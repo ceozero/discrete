@@ -66,13 +66,14 @@ bool writeKeyJson(const std::string& outPath, const CryptoPQ::SeedMaster& seed, 
   }
 
   out << "{\n"
+      << "  \"version\": 1,\n"
+      << "  \"algorithm\": \"ML-DSA-65\",\n"
       << "  \"key_epoch\": 1,\n"
       << "  \"seed_master\": \"" << seedHex << "\",\n"
       << "  \"mnemonic\": \"" << mnemonic << "\",\n"
-      << "  \"hot_spend_pub\": \"" << spendPubHex << "\",\n"
-      << "  \"hot_spend_sk\": \"" << spendSkHex << "\",\n"
-      << "  \"spend_pub\": \"" << spendPubHex << "\",\n"
-      << "  \"spend_sk\": \"" << spendSkHex << "\",\n"
+      // 字段名必须与 cluster-controller 读取的稳定协议一致。
+      << "  \"miner_spend_pub\": \"" << spendPubHex << "\",\n"
+      << "  \"miner_spend_sk\": \"" << spendSkHex << "\",\n"
       << "  \"view_pub\": \"" << viewPubHex << "\",\n"
       << "  \"pq_address\": \"" << pqAddrStr << "\"\n"
       << "}\n";
