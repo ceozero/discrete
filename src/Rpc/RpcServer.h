@@ -23,6 +23,7 @@
 #include <list>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <unordered_map>
 #include "HTTP/HttpServer.h"
 #include "HTTP/HttpRequest.h"
@@ -151,6 +152,8 @@ private:
   bool on_get_stats_by_heights_range(const COMMAND_RPC_GET_STATS_BY_HEIGHTS_RANGE::request& req, COMMAND_RPC_GET_STATS_BY_HEIGHTS_RANGE::response& res);
   bool on_get_pq_account(const COMMAND_RPC_GET_PQ_ACCOUNT::request& req, COMMAND_RPC_GET_PQ_ACCOUNT::response& res);
   bool on_resolve_pq_account(const COMMAND_RPC_RESOLVE_PQ_ACCOUNT::request& req, COMMAND_RPC_RESOLVE_PQ_ACCOUNT::response& res);
+  bool on_getblocktemplate_cluster(const COMMAND_RPC_GETBLOCKTEMPLATE_CLUSTER::request& req, COMMAND_RPC_GETBLOCKTEMPLATE_CLUSTER::response& res);
+  bool on_submitblock_cluster(const COMMAND_RPC_SUBMITBLOCK_CLUSTER::request& req, COMMAND_RPC_SUBMITBLOCK_CLUSTER::response& res);
 
   void fill_block_header_response(const Block& blk, bool orphan_status, uint32_t height, const Crypto::Hash& hash, block_header_response& responce);
   void listen(const std::string address, const uint16_t port);
@@ -175,6 +178,9 @@ private:
   bool m_restricted_rpc;
   std::string m_cors_domain;
   std::string m_contact_info;
+
+  std::mutex m_clusterTemplatesMutex;
+  std::list<std::pair<std::string, Block>> m_clusterTemplates;
 
 };
 

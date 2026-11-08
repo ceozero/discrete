@@ -1420,4 +1420,74 @@ struct COMMAND_RPC_RESOLVE_PQ_ACCOUNT {
   };
 };
 
+struct COMMAND_RPC_GETBLOCKTEMPLATE_CLUSTER {
+  struct request {
+    std::string miner_spend_pub; // Hex encoded 1952-byte ML-DSA-65 public key
+    uint32_t reserve_size = 8;   // ExtraNonce bytes reserved in coinbase extra
+
+    void serialize(ISerializer& s) {
+      KV_MEMBER(miner_spend_pub)
+      KV_MEMBER(reserve_size)
+    }
+  };
+
+  struct response {
+    uint32_t height = 0;
+    uint64_t difficulty = 0;
+    uint64_t expected_reward = 0;
+    uint64_t reserved_offset = 0;    // ExtraNonce offset in blocktemplate_blob
+    uint64_t nonce_offset = 0;       // 4-byte nonce offset in blockhashing_blob
+    std::string prev_hash;           // 32-byte hex
+    std::string blocktemplate_blob;  // Hex encoded Block (with dummy 3309B signature)
+    std::string blockhashing_blob;   // Hex encoded C_B (~76 bytes)
+    std::string template_id;         // 16-byte hex ID for tracking
+    std::string status;
+
+    void serialize(ISerializer& s) {
+      KV_MEMBER(height)
+      KV_MEMBER(difficulty)
+      KV_MEMBER(expected_reward)
+      KV_MEMBER(reserved_offset)
+      KV_MEMBER(nonce_offset)
+      KV_MEMBER(prev_hash)
+      KV_MEMBER(blocktemplate_blob)
+      KV_MEMBER(blockhashing_blob)
+      KV_MEMBER(template_id)
+      KV_MEMBER(status)
+    }
+  };
+};
+
+struct COMMAND_RPC_SUBMITBLOCK_CLUSTER {
+  struct request {
+    std::string template_id;         // Optional: template_id from getblocktemplate_cluster
+    std::string blocktemplate_blob;  // Hex encoded Block (can omit if template_id cached)
+    std::string nonce_le;            // 4-byte hex (8 chars)
+    std::string signature;           // 3309-byte hex (6618 chars)
+
+    void serialize(ISerializer& s) {
+      KV_MEMBER(template_id)
+      KV_MEMBER(blocktemplate_blob)
+      KV_MEMBER(nonce_le)
+      KV_MEMBER(signature)
+    }
+  };
+
+  struct response {
+    std::string block_hash;          // 32-byte hex of accepted block
+    uint32_t height = 0;
+    uint64_t reward = 0;
+    uint32_t unlock_height = 0;
+    std::string status;
+
+    void serialize(ISerializer& s) {
+      KV_MEMBER(block_hash)
+      KV_MEMBER(height)
+      KV_MEMBER(reward)
+      KV_MEMBER(unlock_height)
+      KV_MEMBER(status)
+    }
+  };
+};
+
 }

@@ -219,6 +219,8 @@ std::unordered_map<std::string, RpcServer::RpcHandler<RpcServer::HandlerFunction
   { "/stop_daemon", { jsonMethod<COMMAND_RPC_STOP_DAEMON>(&RpcServer::on_stop_daemon), true } },
   { "/getconnections", { jsonMethod<COMMAND_RPC_GET_CONNECTIONS>(&RpcServer::on_get_connections), true } },
   { "/getpeers", { jsonMethod<COMMAND_RPC_GET_PEER_LIST>(&RpcServer::on_get_peer_list), true } },
+  { "/getblocktemplate_cluster", { jsonMethod<COMMAND_RPC_GETBLOCKTEMPLATE_CLUSTER>(&RpcServer::on_getblocktemplate_cluster), true } },
+  { "/submitblock_cluster", { jsonMethod<COMMAND_RPC_SUBMITBLOCK_CLUSTER>(&RpcServer::on_submitblock_cluster), true } },
 
 
   // json rpc
@@ -725,6 +727,8 @@ bool RpcServer::processJsonRpcRequest(const CryptoNote::HttpRequest& request, Cr
       { "getaccountnumber", { makeMemberMethod(&RpcServer::on_get_pq_account), true } },
       { "resolveaccountnumber", { makeMemberMethod(&RpcServer::on_resolve_pq_account), true } },
       { "resync_to_majority", { makeMemberMethod(&RpcServer::on_resync_to_majority), true } },
+      { "getblocktemplate_cluster", { makeMemberMethod(&RpcServer::on_getblocktemplate_cluster), true } },
+      { "submitblock_cluster", { makeMemberMethod(&RpcServer::on_submitblock_cluster), true } },
 
     };
 
@@ -2229,6 +2233,179 @@ bool RpcServer::on_resolve_pq_account(const COMMAND_RPC_RESOLVE_PQ_ACCOUNT::requ
                                              viewPub.data(), viewPub.size());
     res.account_number = AccountNumber{req.block_height, req.tx_index}.toString(fp);
   }
+  res.status = CORE_RPC_STATUS_OK;
+  return true;
+}
+
+bool RpcServer::on_getblocktemplate_cluster(
+    const COMMAND_RPC_GETBLOCKTEMPLATE_CLUSTER::request& req,
+    COMMAND_RPC_GETBLOCKTEMPLATE_CLUSTER::response& res) {
+  if (m_restricted_rpc) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Method disabled in restricted RPC mode" };
+  }
+
+  if (req.reserve_size > TX_EXTRA_NONCE_MAX_COUNT) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Too big reserve_size, maximum 255" };
+  }
+
+  CryptoPQ::DsaPublicKey spendPub{};
+  size_t sz = 0;
+  if (!Common::fromHex(req.miner_spend_pub, spendPub.data(), spendPub.size(), sz) || sz != spendPub.size()) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Invalid miner_spend_pub hex (expected 1952 bytes)" };
+  }
+
+  BinaryArray extraNonce(req.reserve_size, 0x5A);
+  CryptoPQ::KemPublicKey dummyViewPub{};
+  Block b;
+  Difficulty diffic = 0;
+  uint32_t height = 0;
+  if (!m_core.get_block_template_pq(b, dummyViewPub, spendPub, diffic, height, extraNonce)) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Failed to create PQ block template" };
+  }
+
+  // Ensure b.signature has the required PQ_SIGNATURE_SIZE (3309 bytes) for full Block serialization.
+  b.signature.assign(PQ_SIGNATURE_SIZE, 0);
+
+  BinaryArray blockBlob;
+  if (!toBinaryArray(b, blockBlob)) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Failed to serialize block template" };
+  }
+
+  if (!extraNonce.empty()) {
+    // Locate extra_nonce in blockBlob (after header + 3309B signature).
+    BinaryArray headerBlob;
+    toBinaryArray(static_cast<const BlockHeader&>(b), headerBlob);
+    size_t searchStart = headerBlob.size() + PQ_SIGNATURE_SIZE;
+    BinaryArray pattern;
+    pattern.push_back(TX_EXTRA_NONCE);
+    pattern.push_back(static_cast<uint8_t>(extraNonce.size()));
+    pattern.insert(pattern.end(), extraNonce.begin(), extraNonce.end());
+
+    auto it = std::search(blockBlob.begin() + searchStart, blockBlob.end(), pattern.begin(), pattern.end());
+    if (it == blockBlob.end()) {
+      throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Failed to locate extra_nonce in block template" };
+    }
+    res.reserved_offset = static_cast<uint64_t>(std::distance(blockBlob.begin(), it) + 2);
+    // Zero out the reserved extra_nonce bytes in the final template.
+    std::fill_n(blockBlob.begin() + res.reserved_offset, extraNonce.size(), 0);
+    if (!fromBinaryArray(b, blockBlob)) {
+      throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Failed to re-parse zeroed block template" };
+    }
+  } else {
+    res.reserved_offset = 0;
+  }
+
+  BinaryArray headerBlob;
+  if (!toBinaryArray(static_cast<const BlockHeader&>(b), headerBlob) || headerBlob.size() < sizeof(b.nonce)) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Failed to serialize block header" };
+  }
+  res.nonce_offset = static_cast<uint64_t>(headerBlob.size() - sizeof(b.nonce));
+
+  BinaryArray hashingBlob;
+  if (!get_block_hashing_blob(b, hashingBlob)) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Failed to construct block hashing blob" };
+  }
+
+  uint64_t reward = 0;
+  for (const auto& out : b.baseTransaction.outputs) {
+    reward += out.amount;
+  }
+
+  // Generate 16-byte template_id from SHA3-256(blockBlob).
+  CryptoPQ::Hash256 tplDigest = CryptoPQ::sha3_256(blockBlob.data(), blockBlob.size());
+  std::string templateId = Common::toHex(tplDigest.data(), 16);
+
+  {
+    std::lock_guard<std::mutex> lock(m_clusterTemplatesMutex);
+    // Keep up to 64 recent templates in ring buffer.
+    for (auto it = m_clusterTemplates.begin(); it != m_clusterTemplates.end(); ++it) {
+      if (it->first == templateId) {
+        m_clusterTemplates.erase(it);
+        break;
+      }
+    }
+    m_clusterTemplates.emplace_back(templateId, b);
+    while (m_clusterTemplates.size() > 64) {
+      m_clusterTemplates.pop_front();
+    }
+  }
+
+  res.height = height;
+  res.difficulty = diffic;
+  res.expected_reward = reward;
+  res.prev_hash = Common::podToHex(b.previousBlockHash);
+  res.blocktemplate_blob = Common::toHex(blockBlob.data(), blockBlob.size());
+  res.blockhashing_blob = Common::toHex(hashingBlob.data(), hashingBlob.size());
+  res.template_id = templateId;
+  res.status = CORE_RPC_STATUS_OK;
+  return true;
+}
+
+bool RpcServer::on_submitblock_cluster(
+    const COMMAND_RPC_SUBMITBLOCK_CLUSTER::request& req,
+    COMMAND_RPC_SUBMITBLOCK_CLUSTER::response& res) {
+  if (m_restricted_rpc) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Method disabled in restricted RPC mode" };
+  }
+
+  Block b;
+  bool foundTemplate = false;
+
+  if (!req.blocktemplate_blob.empty()) {
+    BinaryArray blockBlob;
+    if (!Common::fromHex(req.blocktemplate_blob, blockBlob) || !fromBinaryArray(b, blockBlob)) {
+      throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Invalid blocktemplate_blob" };
+    }
+    foundTemplate = true;
+  } else if (!req.template_id.empty()) {
+    std::lock_guard<std::mutex> lock(m_clusterTemplatesMutex);
+    for (const auto& entry : m_clusterTemplates) {
+      if (entry.first == req.template_id) {
+        b = entry.second;
+        foundTemplate = true;
+        break;
+      }
+    }
+  }
+
+  if (!foundTemplate) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Block template not found (provide blocktemplate_blob or a valid template_id)" };
+  }
+
+  std::array<uint8_t, 4> nonceBytes{};
+  size_t nonceSz = 0;
+  if (!Common::fromHex(req.nonce_le, nonceBytes.data(), nonceBytes.size(), nonceSz) || nonceSz != 4) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Invalid nonce_le (expected 4-byte hex)" };
+  }
+  std::memcpy(&b.nonce, nonceBytes.data(), 4);
+
+  std::vector<uint8_t> sigBytes;
+  if (!Common::fromHex(req.signature, sigBytes) || sigBytes.size() != PQ_SIGNATURE_SIZE) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Invalid signature (expected 3309-byte hex)" };
+  }
+  b.signature = std::move(sigBytes);
+
+  // Prevalidate block Proof-of-Work & ML-DSA-65 signature before acquiring Core locks.
+  PrevalidatedBlockProof proof{};
+  if (!m_core.prevalidateBlockProofOfWork(b, proof)) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_WRONG_PARAM, "Block PoW / ML-DSA-65 verification failed" };
+  }
+
+  block_verification_context bvc = boost::value_initialized<block_verification_context>();
+  if (!m_core.handle_incoming_block_prevalidated(b, proof, bvc, true, true) ||
+      bvc.m_verification_failed || bvc.m_marked_as_orphaned) {
+    throw JsonRpc::JsonRpcError{ CORE_RPC_ERROR_CODE_INTERNAL_ERROR, "Block not accepted by core" };
+  }
+
+  uint64_t reward = 0;
+  for (const auto& out : b.baseTransaction.outputs) {
+    reward += out.amount;
+  }
+
+  res.block_hash = Common::podToHex(proof.blockHash);
+  res.height = get_block_height(b);
+  res.reward = reward;
+  res.unlock_height = static_cast<uint32_t>(b.baseTransaction.unlockHeight);
   res.status = CORE_RPC_STATUS_OK;
   return true;
 }

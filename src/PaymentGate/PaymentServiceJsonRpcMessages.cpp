@@ -194,6 +194,8 @@ void GetPqBalance::Request::serialize(CryptoNote::ISerializer& serializer) {
 void GetPqBalance::Response::serialize(CryptoNote::ISerializer& serializer) {
   serializer(availableBalance, "availableBalance");
   serializer(lockedAmount, "lockedAmount");
+  serializer(availableBalance, "available_balance");
+  serializer(lockedAmount, "locked_amount");
   serializer(scannedHeight, "scannedHeight");
   serializer(pqEnabled, "enabled");
 }
@@ -442,7 +444,7 @@ void VerifyMessage::Response::serialize(CryptoNote::ISerializer& serializer) {
 void SendTransaction::Request::serialize(CryptoNote::ISerializer& serializer) {
   serializer(sourceAddresses, "addresses");
 
-  if (!serializer(transfers, "transfers")) {
+  if (!serializer(transfers, "transfers") && !serializer(transfers, "destinations")) {
     throw RequestSerializationError();
   }
 
@@ -453,17 +455,20 @@ void SendTransaction::Request::serialize(CryptoNote::ISerializer& serializer) {
   }
 
   bool hasExtra = serializer(extra, "extra");
-  bool hasPaymentId = serializer(paymentId, "paymentId");
+  bool hasPaymentId = serializer(paymentId, "paymentId") || serializer(paymentId, "payment_id");
 
   if (hasExtra && hasPaymentId) {
     throw RequestSerializationError();
   }
 
-  serializer(unlockHeight, "unlockHeight");
+  if (!serializer(unlockHeight, "unlockHeight")) {
+    serializer(unlockHeight, "unlock_height");
+  }
 }
 
 void SendTransaction::Response::serialize(CryptoNote::ISerializer& serializer) {
   serializer(transactionHash, "transactionHash");
+  serializer(transactionHash, "tx_hash");
   serializer(paymentProofs, "paymentProofs");
 }
 
