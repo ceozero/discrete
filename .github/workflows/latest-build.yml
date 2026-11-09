@@ -3,13 +3,14 @@ name: Latest Build
 on:
   push:
     branches:
-      - '**'
+      - master
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: latest-build-release
+  group: latest-build-master
   cancel-in-progress: true
 
 jobs:
@@ -56,7 +57,7 @@ jobs:
         run: |
           set -euo pipefail
           build_folder="build/release"
-          release_name="discrete-cli-debian12-${{ matrix.arch }}-${GITHUB_SHA}"
+          release_name="discrete-daemon-debian12-${{ matrix.arch }}"
 
           mkdir -p "$build_folder"
           cd "$build_folder"
@@ -69,10 +70,11 @@ jobs:
             -DDISCRETE_BOOST_PREFER_MODULE=ON \
             -DOQS_BUILD_ONLY_LIB=ON \
             ../..
-          cmake --build . --config Release --target Daemon SimpleWallet GreenWallet PaymentGateService AdminTools -- -j"$(nproc)"
+          cmake --build . --config Release --target Daemon PaymentGateService MinerKeyTool -- -j"$(nproc)"
 
           mkdir -p "$release_name"
-          for bin in discreted simplewallet greenwallet walletd admin-tools; do
+          # discrete-pool 中心镜像仅依赖这三个 C++ 程序。
+          for bin in discreted walletd discrete-miner-key; do
             file="src/$bin"
             if [[ ! -f "$file" || ! -x "$file" ]]; then
               echo "Expected binary not found: $file"
@@ -116,10 +118,20 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          gh release delete latest-build --cleanup-tag --yes || true
-          gh release create latest-build \
-            --target "$GITHUB_SHA" \
-            --title "Latest Build" \
-            --prerelease \
-            --notes "Automated Debian 12 builds for commit $GITHUB_SHA." \
-            dist/*
+          if gh release view latest-build >/dev/null 2>&1; then
+            gh api --method PATCH "repos/${GH_REPO}/git/refs/tags/latest-build" \
+              -f sha="$GITHUB_SHA" \
+              -F force=true
+            gh release upload latest-build dist/* --clobber
+            gh release edit latest-build \
+              --title "Latest Build" \
+              --prerelease \
+              --notes "Automated Debian 12 builds for commit $GITHUB_SHA."
+          else
+            gh release create latest-build \
+              --target "$GITHUB_SHA" \
+              --title "Latest Build" \
+              --prerelease \
+              --notes "Automated Debian 12 builds for commit $GITHUB_SHA." \
+              dist/*
+          fi
