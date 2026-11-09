@@ -1,0 +1,124 @@
+name: Latest Build
+
+on:
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: latest-build-release
+  cancel-in-progress: true
+
+jobs:
+  build-debian12:
+    name: Debian 12 (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: debian:12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            binutils \
+            build-essential \
+            ca-certificates \
+            cmake \
+            git \
+            libboost-all-dev \
+            libssl-dev \
+            pkg-config
+          rm -rf /var/lib/apt/lists/*
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+
+      - name: Mark repository as safe
+        run: git config --global --add safe.directory '*'
+
+      - name: Build and package
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_folder="build/release"
+          release_name="discrete-cli-debian12-${{ matrix.arch }}-${GITHUB_SHA}"
+
+          mkdir -p "$build_folder"
+          cd "$build_folder"
+          cmake -D ARCH=default -D CMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+            -DCMAKE_CXX_FLAGS_RELEASE="-O3 -DNDEBUG" \
+            -DCMAKE_POSITION_INDEPENDENT_CODE:BOOL=true \
+            -DBOOST_IGNORE_SYSTEM_PATHS_DEFAULT=ON \
+            -DBOOST_ROOT=/usr \
+            -DDISCRETE_BOOST_PREFER_MODULE=ON \
+            -DOQS_BUILD_ONLY_LIB=ON \
+            ../..
+          cmake --build . --config Release --target Daemon SimpleWallet GreenWallet PaymentGateService AdminTools -- -j"$(nproc)"
+
+          mkdir -p "$release_name"
+          for bin in discreted simplewallet greenwallet walletd admin-tools; do
+            file="src/$bin"
+            if [[ ! -f "$file" || ! -x "$file" ]]; then
+              echo "Expected binary not found: $file"
+              exit 1
+            fi
+            strip "$file"
+            cp "$file" "$release_name/"
+          done
+
+          tar -czf "$release_name.tar.gz" -C "$release_name" .
+          sha256sum "$release_name.tar.gz" > "$release_name.tar.gz.sha256"
+          echo "asset_path=$PWD/$release_name.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum_path=$PWD/$release_name.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian12-${{ matrix.arch }}
+          path: |
+            ${{ steps.build.outputs.asset_path }}
+            ${{ steps.build.outputs.checksum_path }}
+          if-no-files-found: error
+
+  publish-latest-build:
+    name: Publish Latest Build
+    needs: build-debian12
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Debian 12 artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: debian12-*
+          merge-multiple: true
+          path: dist
+
+      - name: Replace Latest Build release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete latest-build --cleanup-tag --yes || true
+          gh release create latest-build \
+            --target "$GITHUB_SHA" \
+            --title "Latest Build" \
+            --prerelease \
+            --notes "Automated Debian 12 builds for commit $GITHUB_SHA." \
+            dist/*
