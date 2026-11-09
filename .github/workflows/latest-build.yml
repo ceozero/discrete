@@ -113,6 +113,7 @@ jobs:
       - name: Replace Latest Build release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           gh release delete latest-build --cleanup-tag --yes || true
